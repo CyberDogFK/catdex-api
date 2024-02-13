@@ -1,44 +1,42 @@
+mod models;
+mod schema;
+
+use self::models::*;
+use self::schema::cats::dsl::*;
 use actix_files::{Files, NamedFile};
-use actix_web::{web, App, HttpServer, Responder, Result};
-use serde::Serialize;
+use actix_web::{error, web, App, Error, HttpResponse, HttpServer, Result};
+use diesel::r2d2::ConnectionManager;
+use diesel::{PgConnection, QueryDsl, RunQueryDsl};
+use std::env;
+
+type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
 async fn index() -> Result<NamedFile> {
     Ok(NamedFile::open("./static/index.html")?)
 }
 
-#[derive(Serialize)]
-pub struct Cat {
-    pub id: i32,
-    pub name: String,
-    pub image_path: String,
-}
-
-async fn cats_endpoint() -> impl Responder {
-    let cats = vec![
-        Cat {
-            id: 1,
-            name: "British Short Hair".to_string(),
-            image_path: "image/british-short-hair.jpg".to_string(),
-        },
-        Cat {
-            id: 2,
-            name: "Persian".to_string(),
-            image_path: "image/persian.jpg".to_string()
-        },
-        Cat {
-            id: 3,
-            name: "Ragdoll".to_string(),
-            image_path: "image/ragdoll.jpg".to_string(),
-        },
-    ];
-    return web::Json(cats);
+async fn cats_endpoint(pool: web::Data<DbPool>) -> Result<HttpResponse, Error> {
+    let mut connection = pool.get().expect("Can't get db connection from pool");
+    let cats_data = web::block(move || cats.limit(100).load::<Cat>(&mut connection))
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .map_err(error::ErrorInternalServerError)?;
+    Ok(HttpResponse::Ok().json(cats_data))
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let manager = ConnectionManager::<PgConnection>::new(&database_url);
+    let pool = r2d2::Pool::builder()
+        .build(manager)
+        .expect("Failed to create DB connection pool.");
+
     println!("Listening on port 8080");
-    HttpServer::new(|| {
+
+    HttpServer::new(move || {
         App::new()
+            .app_data(web::Data::new(pool.clone()))
             .service(Files::new("/static", "static").show_files_listing())
             .service(Files::new("/image", "image").show_files_listing())
             .service(web::scope("/api").route("/cats", web::get().to(cats_endpoint)))
