@@ -1,16 +1,19 @@
+mod errors;
 mod models;
 mod schema;
 
+use self::errors::UserError;
 use self::models::*;
 use self::schema::cats::dsl::*;
 use actix_files::{Files, NamedFile};
 use actix_web::{error, web, App, Error, HttpResponse, HttpServer, Result};
 use diesel::r2d2::ConnectionManager;
 use diesel::{ExpressionMethods, PgConnection, QueryDsl, RunQueryDsl};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
-use serde::Deserialize;
+use validator::Validate;
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -27,27 +30,28 @@ async fn cats_endpoint(pool: web::Data<DbPool>) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(cats_data))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 struct CatEndpointPath {
+    #[validate(range(min = 1, max = 150))]
     id: i32,
 }
 
 async fn cat_endpoint(
     pool: web::Data<DbPool>,
-    cat_id: web::Path<CatEndpointPath>
-) -> Result<HttpResponse, Error> {
-    let mut connection =
-        pool.get().expect("Can't get db connection from pool");
+    cat_id: web::Path<CatEndpointPath>,
+) -> Result<HttpResponse, UserError> {
+    cat_id.validate().map_err(|_| UserError::ValidationError)?;
 
-    let cat_data = web::block(move || {
-        cats.filter(id.eq(cat_id.id))
-            .first::<Cat>(&mut connection)
-    })
-        .await?
-        .map_err(error::ErrorInternalServerError)?;
-    Ok(HttpResponse::Ok()
-        .json(cat_data)
-    )
+    let mut connection = pool.get().map_err(|_| UserError::DBPoolGetError)?;
+
+    let cat_data = web::block(move || cats.filter(id.eq(cat_id.id)).first::<Cat>(&mut connection))
+        .await
+        .map_err(|_| UserError::UnexpectedError)?
+        .map_err(|e| match e {
+            diesel::result::Error::NotFound => UserError::NotFoundError,
+            _ => UserError::UnexpectedError,
+        })?;
+    Ok(HttpResponse::Ok().json(cat_data))
 }
 
 async fn add_cat_endpoint(
@@ -67,7 +71,11 @@ async fn add_cat_endpoint(
 
     let new_cat = NewCat {
         name: text_fields.get("name").unwrap().to_string(),
-        image_path: file_path.to_string_lossy().strip_prefix(".").unwrap().to_string(),
+        image_path: file_path
+            .to_string_lossy()
+            .strip_prefix(".")
+            .unwrap()
+            .to_string(),
     };
 
     web::block(move || {
@@ -113,6 +121,9 @@ async fn main() -> std::io::Result<()> {
 fn api_config(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")
+            .app_data(
+                web::PathConfig::default().error_handler(|_, _| UserError::ValidationError.into()),
+            )
             .route("/cats", web::get().to(cats_endpoint))
             .route("/add_cat", web::post().to(add_cat_endpoint))
             .route("/cat/{id}", web::get().to(cat_endpoint)),
