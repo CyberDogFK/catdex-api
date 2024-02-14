@@ -6,10 +6,11 @@ use self::schema::cats::dsl::*;
 use actix_files::{Files, NamedFile};
 use actix_web::{error, web, App, Error, HttpResponse, HttpServer, Result};
 use diesel::r2d2::ConnectionManager;
-use diesel::{PgConnection, QueryDsl, RunQueryDsl};
+use diesel::{ExpressionMethods, PgConnection, QueryDsl, RunQueryDsl};
 use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
+use serde::Deserialize;
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -24,6 +25,29 @@ async fn cats_endpoint(pool: web::Data<DbPool>) -> Result<HttpResponse, Error> {
         .map_err(error::ErrorInternalServerError)?
         .map_err(error::ErrorInternalServerError)?;
     Ok(HttpResponse::Ok().json(cats_data))
+}
+
+#[derive(Deserialize)]
+struct CatEndpointPath {
+    id: i32,
+}
+
+async fn cat_endpoint(
+    pool: web::Data<DbPool>,
+    cat_id: web::Path<CatEndpointPath>
+) -> Result<HttpResponse, Error> {
+    let mut connection =
+        pool.get().expect("Can't get db connection from pool");
+
+    let cat_data = web::block(move || {
+        cats.filter(id.eq(cat_id.id))
+            .first::<Cat>(&mut connection)
+    })
+        .await?
+        .map_err(error::ErrorInternalServerError)?;
+    Ok(HttpResponse::Ok()
+        .json(cat_data)
+    )
 }
 
 async fn add_cat_endpoint(
@@ -43,7 +67,7 @@ async fn add_cat_endpoint(
 
     let new_cat = NewCat {
         name: text_fields.get("name").unwrap().to_string(),
-        image_path: file_path.to_string_lossy().to_string(),
+        image_path: file_path.to_string_lossy().strip_prefix(".").unwrap().to_string(),
     };
 
     web::block(move || {
@@ -90,7 +114,8 @@ fn api_config(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")
             .route("/cats", web::get().to(cats_endpoint))
-            .route("/add_cat", web::get().to(add_cat_endpoint)),
+            .route("/add_cat", web::post().to(add_cat_endpoint))
+            .route("/cat/{id}", web::get().to(cat_endpoint)),
     );
 }
 
