@@ -7,9 +7,9 @@ use actix_files::{Files, NamedFile};
 use actix_web::{error, web, App, Error, HttpResponse, HttpServer, Result};
 use diesel::r2d2::ConnectionManager;
 use diesel::{PgConnection, QueryDsl, RunQueryDsl};
+use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
-use std::collections::HashMap;
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -37,56 +37,79 @@ async fn add_cat_endpoint(
         .and_then(|f| f.persist_in("./image").ok())
         .unwrap_or_default();
 
-    let text_fields: HashMap<_, _> =
-        parts.texts.as_pairs().into_iter().collect();
+    let text_fields: HashMap<_, _> = parts.texts.as_pairs().into_iter().collect();
 
-    let mut connection = pool.get()
-        .expect("Can't get db connection from pool");
+    let mut connection = pool.get().expect("Can't get db connection from pool");
 
     let new_cat = NewCat {
-        name: text_fields.get("name")
-            .unwrap().to_string(),
-        image_path: file_path.to_string_lossy().to_string()
+        name: text_fields.get("name").unwrap().to_string(),
+        image_path: file_path.to_string_lossy().to_string(),
     };
 
-    web::block(move ||
+    web::block(move || {
         diesel::insert_into(cats)
             .values(&new_cat)
-            .execute(&mut connection))
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .map_err(error::ErrorInternalServerError)?;
+            .execute(&mut connection)
+    })
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Created().finish())
 }
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
+fn setup_database() -> DbPool {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let manager = ConnectionManager::<PgConnection>::new(&database_url);
-    let pool = r2d2::Pool::builder()
+    r2d2::Pool::builder()
         .connection_timeout(Duration::from_secs(5))
         .build(manager)
-        .expect("Failed to create DB connection pool.");
+        .expect("Failed to create DB connection pool.")
+}
 
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let pool = setup_database();
     println!("Listening on port 8080");
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
-            .app_data(
-                awmp::PartsConfig::default().with_temp_dir("./tmp")
-            )
+            .app_data(awmp::PartsConfig::default().with_temp_dir("./tmp"))
             .service(Files::new("/static", "static").show_files_listing())
             .service(Files::new("/image", "image").show_files_listing())
-            .service(
-                web::scope("/api")
-                    .route("/cats", web::get().to(cats_endpoint))
-                    .route("/add_cat", web::post().to(add_cat_endpoint))
-            )
+            .configure(api_config)
             .route("/", web::get().to(index))
     })
     .bind("127.0.0.1:8080")?
     .run()
     .await
+}
+
+fn api_config(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::scope("/api")
+            .route("/cats", web::get().to(cats_endpoint))
+            .route("/add_cat", web::get().to(add_cat_endpoint)),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{test, App};
+
+    #[actix_web::test]
+    async fn test_cats_endpoint_get() {
+        let pool = setup_database();
+        let mut app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .configure(api_config),
+        )
+        .await;
+        let req = test::TestRequest::get().uri("/api/cats").to_request();
+        let resp = test::call_service(&mut app, req).await;
+        assert!(resp.status().is_success());
+    }
 }

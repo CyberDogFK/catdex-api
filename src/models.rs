@@ -1,6 +1,6 @@
-use diesel::{Queryable, Insertable};
-use serde::Serialize;
 use crate::schema::cats;
+use diesel::{Insertable, Queryable};
+use serde::Serialize;
 
 #[derive(Queryable, Serialize)]
 pub struct Cat {
