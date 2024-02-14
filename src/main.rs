@@ -6,16 +6,17 @@ use self::errors::UserError;
 use self::models::*;
 use self::schema::cats::dsl::*;
 use actix_files::{Files, NamedFile};
-use actix_web::{error, web, App, Error, HttpResponse, HttpServer, Result};
+use actix_web::middleware::Logger;
+use actix_web::{web, App, Error, HttpResponse, HttpServer, Result};
 use diesel::r2d2::ConnectionManager;
 use diesel::{ExpressionMethods, PgConnection, QueryDsl, RunQueryDsl};
+use log::{error, info, warn};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use validator::Validate;
-use actix_web::middleware::Logger;
-use log::{error, info, warn};
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
 
@@ -48,21 +49,18 @@ async fn cat_endpoint(
     pool: web::Data<DbPool>,
     cat_id: web::Path<CatEndpointPath>,
 ) -> Result<HttpResponse, UserError> {
-    cat_id.validate()
-        .map_err(|_| {
-            warn!("Parameter validation failed");
-            UserError::ValidationError
-        })?;
+    cat_id.validate().map_err(|_| {
+        warn!("Parameter validation failed");
+        UserError::ValidationError
+    })?;
 
-    let mut connection = pool.get()
-        .map_err(|_| {
-            error!("Failed to get DB connection from pool");
-            UserError::DBPoolGetError
-        })?;
+    let mut connection = pool.get().map_err(|_| {
+        error!("Failed to get DB connection from pool");
+        UserError::DBPoolGetError
+    })?;
     let query_id = cat_id.id.clone();
 
-    let cat_data = web::block(move || cats.filter(id.eq(query_id))
-        .first::<Cat>(&mut connection))
+    let cat_data = web::block(move || cats.filter(id.eq(query_id)).first::<Cat>(&mut connection))
         .await
         .map_err(|_| {
             error!("Blocking Thread Pool Error");
@@ -72,11 +70,11 @@ async fn cat_endpoint(
             diesel::result::Error::NotFound => {
                 error!("Cat ID: {} not found in DB", &cat_id.id);
                 UserError::NotFoundError
-            },
+            }
             _ => {
                 error!("Unexpected error");
                 UserError::UnexpectedError
-            },
+            }
         })?;
     Ok(HttpResponse::Ok().json(cat_data))
 }
@@ -97,24 +95,27 @@ async fn add_cat_endpoint(
 
     let text_fields: HashMap<_, _> = parts.texts.as_pairs().into_iter().collect();
 
-    let mut connection = pool.get()
-        .map_err(|_| {
-            error!("Failed to get DB connection from pool");
-            UserError::DBPoolGetError
-        })?;
+    let mut connection = pool.get().map_err(|_| {
+        error!("Failed to get DB connection from pool");
+        UserError::DBPoolGetError
+    })?;
 
     let new_cat = NewCat {
-        name: text_fields.get("name").ok_or_else(|| {
-            error!("Error in getting name field");
-            UserError::ValidationError
-        })?.to_string(),
+        name: text_fields
+            .get("name")
+            .ok_or_else(|| {
+                error!("Error in getting name field");
+                UserError::ValidationError
+            })?
+            .to_string(),
         image_path: file_path
             .to_string_lossy()
             .strip_prefix(".")
             .ok_or_else(|| {
                 error!("Error in striping file path prefix");
                 UserError::ValidationError
-            })?.to_string(),
+            })?
+            .to_string(),
     };
 
     web::block(move || {
@@ -148,6 +149,15 @@ fn setup_database() -> DbPool {
 async fn main() -> std::io::Result<()> {
     env_logger::init();
 
+    //Set up the certificate
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+        .unwrap();
+    builder.set_private_key_file(
+        "key-no-password.pem",
+        SslFiletype::PEM,
+    ).unwrap();
+    builder.set_certificate_chain_file("cert.pem").unwrap();
+
     let pool = setup_database();
     info!("Listening on port 8080");
 
@@ -161,7 +171,7 @@ async fn main() -> std::io::Result<()> {
             .configure(api_config)
             .route("/", web::get().to(index))
     })
-    .bind("127.0.0.1:8080")?
+    .bind_openssl("127.0.0.1:8080", builder)?
     .run()
     .await
 }
