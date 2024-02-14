@@ -11,11 +11,11 @@ use actix_web::{web, App, Error, HttpResponse, HttpServer, Result};
 use diesel::r2d2::ConnectionManager;
 use diesel::{ExpressionMethods, PgConnection, QueryDsl, RunQueryDsl};
 use log::{error, info, warn};
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use validator::Validate;
 
 type DbPool = r2d2::Pool<ConnectionManager<PgConnection>>;
@@ -58,7 +58,7 @@ async fn cat_endpoint(
         error!("Failed to get DB connection from pool");
         UserError::DBPoolGetError
     })?;
-    let query_id = cat_id.id.clone();
+    let query_id = cat_id.id;
 
     let cat_data = web::block(move || cats.filter(id.eq(query_id)).first::<Cat>(&mut connection))
         .await
@@ -110,7 +110,7 @@ async fn add_cat_endpoint(
             .to_string(),
         image_path: file_path
             .to_string_lossy()
-            .strip_prefix(".")
+            .strip_prefix('.')
             .ok_or_else(|| {
                 error!("Error in striping file path prefix");
                 UserError::ValidationError
@@ -138,7 +138,7 @@ async fn add_cat_endpoint(
 
 fn setup_database() -> DbPool {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let manager = ConnectionManager::<PgConnection>::new(&database_url);
+    let manager = ConnectionManager::<PgConnection>::new(database_url);
     r2d2::Pool::builder()
         .connection_timeout(Duration::from_secs(5))
         .build(manager)
@@ -150,12 +150,10 @@ async fn main() -> std::io::Result<()> {
     env_logger::init();
 
     //Set up the certificate
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())
+    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+    builder
+        .set_private_key_file("key-no-password.pem", SslFiletype::PEM)
         .unwrap();
-    builder.set_private_key_file(
-        "key-no-password.pem",
-        SslFiletype::PEM,
-    ).unwrap();
     builder.set_certificate_chain_file("cert.pem").unwrap();
 
     let pool = setup_database();
